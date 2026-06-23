@@ -198,6 +198,12 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			mcp.WithString("blocks",
 				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text."),
 			),
+			mcp.WithString("username",
+				mcp.Description("Override the bot's display name for this message. Requires the chat:write.customize scope on the Slack app."),
+			),
+			mcp.WithString("icon_emoji",
+				mcp.Description("Override the bot's icon with an emoji for this message (e.g. ':robot_face:'). Requires the chat:write.customize scope on the Slack app."),
+			),
 		), conversationsHandler.ConversationsAddMessageHandler)
 	}
 

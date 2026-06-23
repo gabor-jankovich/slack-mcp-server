@@ -1,0 +1,82 @@
+# Makefile — fork of korotovsky/slack-mcp-server
+#
+# Static Linux binary build for amd64.
+# CGO_ENABLED=0 + netgo tag ensures no libc dependency —
+# single file, portable anywhere.
+#
+# Targets:
+#   make build          — static binary: build/slack-mcp-server
+#   make install        — copy binary to ~/.local/bin/
+#   make install-system — copy binary to /usr/local/bin/ (requires sudo)
+#   make run-sse        — start in SSE mode, loading secrets from .env
+#   make run-stdio      — start in stdio mode (Claude Code stdio transport)
+#   make clean          — remove the build/ directory
+
+BINARY     := slack-mcp-server
+BUILD_DIR  := build
+CMD_PATH   := ./cmd/slack-mcp-server
+
+# Version from git tag or commit hash
+VERSION    := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS    := -s -w -X main.Version=$(VERSION)
+
+# Static, cgo-free build — works on Arch, musl, glibc systems alike
+GO_BUILD_FLAGS := CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+
+.PHONY: build install install-system run-sse run-stdio clean deps check
+
+## build: static linux/amd64 binary → build/slack-mcp-server
+build: deps
+	@mkdir -p $(BUILD_DIR)
+	$(GO_BUILD_FLAGS) go build \
+		-tags netgo \
+		-ldflags "$(LDFLAGS)" \
+		-trimpath \
+		-o $(BUILD_DIR)/$(BINARY) \
+		$(CMD_PATH)
+	@echo "✓ Built: $(BUILD_DIR)/$(BINARY)"
+	@file $(BUILD_DIR)/$(BINARY)
+	@du -sh $(BUILD_DIR)/$(BINARY)
+
+## install: binary → ~/.local/bin/ (user-level, no sudo)
+install: build
+	@mkdir -p ~/.local/bin
+	install -m 755 $(BUILD_DIR)/$(BINARY) ~/.local/bin/$(BINARY)
+	@echo "✓ Installed: ~/.local/bin/$(BINARY)"
+
+## install-system: binary → /usr/local/bin/ (requires sudo)
+install-system: build
+	sudo install -m 755 $(BUILD_DIR)/$(BINARY) /usr/local/bin/$(BINARY)
+	@echo "✓ Installed: /usr/local/bin/$(BINARY)"
+
+## run-sse: start in SSE mode, loading secrets from .env
+run-sse: build
+	@test -f .env || (echo "Missing .env file! Copy .env.example first."; exit 1)
+	env $$(grep -v '^#' .env | xargs) \
+		$(BUILD_DIR)/$(BINARY) \
+		--transport sse \
+		--port $${SLACK_MCP_PORT:-8011}
+
+## run-stdio: start in stdio mode (Claude Code stdio transport)
+run-stdio: build
+	@test -f .env || (echo "Missing .env file! Copy .env.example first."; exit 1)
+	env $$(grep -v '^#' .env | xargs) \
+		$(BUILD_DIR)/$(BINARY) \
+		--transport stdio
+
+## deps: download Go modules
+deps:
+	go mod download
+	go mod verify
+
+## check: quick syntax check
+check:
+	go vet ./...
+
+## clean: remove build directory
+clean:
+	rm -rf $(BUILD_DIR)
+	@echo "✓ Cleaned"
+
+help:
+	@grep -E '^## ' Makefile | sed 's/## //'

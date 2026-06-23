@@ -94,11 +94,13 @@ type searchParams struct {
 }
 
 type addMessageParams struct {
-	channel     string
-	threadTs    string
-	text        string
+	channel    string
+	threadTs   string
+	text       string
 	contentType string
-	blocks      []slack.Block
+	blocks     []slack.Block
+	username   string
+	iconEmoji  string
 }
 
 type addReactionParams struct {
@@ -256,6 +258,13 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 	} else {
 		options = append(options, slack.MsgOptionDisableLinkUnfurl())
 		options = append(options, slack.MsgOptionDisableMediaUnfurl())
+	}
+
+	if params.username != "" {
+		options = append(options, slack.MsgOptionUsername(params.username))
+	}
+	if params.iconEmoji != "" {
+		options = append(options, slack.MsgOptionIconEmoji(params.iconEmoji))
 	}
 
 	ch.logger.Debug("Posting Slack message",
@@ -1832,12 +1841,17 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 		return nil, errors.New("either text or blocks must be provided")
 	}
 
+	username := request.GetString("username", "")
+	iconEmoji := request.GetString("icon_emoji", "")
+
 	return &addMessageParams{
 		channel:     channel,
 		threadTs:    threadTs,
 		text:        msgText,
 		contentType: contentType,
 		blocks:      blocks,
+		username:    username,
+		iconEmoji:   iconEmoji,
 	}, nil
 }
 
