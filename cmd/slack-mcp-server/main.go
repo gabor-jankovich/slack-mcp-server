@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/korotovsky/slack-mcp-server/internal/runtime"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
 	"github.com/mattn/go-isatty"
@@ -69,7 +70,26 @@ func main() {
 	}
 
 	p := provider.New(transport, logger)
-	s := server.NewMCPServer(p, logger, enabledTools)
+
+	agentRuntimeConfig := runtime.ConfigFromEnv()
+	agentRuntime, err := runtime.New(agentRuntimeConfig, p.Slack(), logger)
+	if err != nil {
+		logger.Fatal("error creating agent runtime",
+			zap.String("context", "console"),
+			zap.Error(err),
+		)
+	}
+	if agentRuntime != nil {
+		if err := agentRuntime.Start(context.Background()); err != nil {
+			logger.Fatal("error starting agent runtime",
+				zap.String("context", "console"),
+				zap.Error(err),
+			)
+		}
+		defer agentRuntime.Stop()
+	}
+
+	s := server.NewMCPServer(p, agentRuntime, logger, enabledTools)
 
 	if noCache {
 		p.SkipCache()

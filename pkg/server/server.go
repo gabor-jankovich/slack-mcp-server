@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/korotovsky/slack-mcp-server/internal/runtime"
 	"github.com/korotovsky/slack-mcp-server/pkg/handler"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
@@ -47,6 +48,12 @@ const (
 	ToolSavedList                   = "saved_list"
 	ToolSavedUpdate                 = "saved_update"
 	ToolSavedClearCompleted         = "saved_clear_completed"
+
+	ToolReadWorkItem      = "slack_read_work_item"
+	ToolAckWorkItem       = "slack_ack_work_item"
+	ToolHeartbeatWorkItem = "slack_heartbeat_work_item"
+	ToolRegisterAgent     = "slack_register_agent"
+	ToolWatchThread       = "slack_watch_thread"
 )
 
 var ValidToolNames = []string{
@@ -72,6 +79,12 @@ var ValidToolNames = []string{
 	ToolSavedList,
 	ToolSavedUpdate,
 	ToolSavedClearCompleted,
+
+	ToolReadWorkItem,
+	ToolAckWorkItem,
+	ToolHeartbeatWorkItem,
+	ToolRegisterAgent,
+	ToolWatchThread,
 }
 
 func ValidateEnabledTools(tools []string) error {
@@ -113,7 +126,7 @@ func shouldAddTool(name string, enabledTools []string, envVarName string) bool {
 	return false
 }
 
-func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledTools []string) *MCPServer {
+func NewMCPServer(provider *provider.ApiProvider, agentRuntime *runtime.AgentRuntime, logger *zap.Logger, enabledTools []string) *MCPServer {
 	s := server.NewMCPServer(
 		"Slack MCP Server",
 		version.Version,
@@ -594,6 +607,84 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.WithTitleAnnotation("Clear Completed Saved Items"),
 				mcp.WithDestructiveHintAnnotation(true),
 			), savedHandler.SavedClearCompletedHandler)
+		}
+	}
+
+	// Register agent runtime tools when the runtime subsystem is enabled.
+	if agentRuntime != nil && agentRuntime.Config().Enabled && agentRuntime.Store() != nil {
+		agentRuntimeHandler := handler.NewAgentRuntimeHandler(provider, agentRuntime.Store(), agentRuntime.Config(), logger)
+
+		if shouldAddTool(ToolReadWorkItem, enabledTools, "SLACK_MCP_AGENT_RUNTIME_TOOLS") {
+			s.AddTool(mcp.NewTool(ToolReadWorkItem,
+				mcp.WithDescription("Read a leased work item and fetch the unseen Slack messages for the thread. Returns messages as CSV. Moves the work item from LEASED to PROCESSING."),
+				mcp.WithTitleAnnotation("Read Work Item"),
+				mcp.WithReadOnlyHintAnnotation(false),
+				mcp.WithString("work_item_id",
+					mcp.Required(),
+					mcp.Description("Opaque work item ID returned by the dispatcher/wake message."),
+				),
+				mcp.WithString("agent_id",
+					mcp.Description("Agent ID that holds the lease. Defaults to the configured default agent."),
+				),
+			), agentRuntimeHandler.ReadWorkItemHandler)
+		}
+
+		if shouldAddTool(ToolAckWorkItem, enabledTools, "SLACK_MCP_AGENT_RUNTIME_TOOLS") {
+			s.AddTool(mcp.NewTool(ToolAckWorkItem,
+				mcp.WithDescription("Acknowledge a processed work item and advance the thread cursor."),
+				mcp.WithTitleAnnotation("Ack Work Item"),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithString("work_item_id",
+					mcp.Required(),
+					mcp.Description("Opaque work item ID to acknowledge."),
+				),
+				mcp.WithString("agent_id",
+					mcp.Description("Agent ID that processed the work item. Defaults to the configured default agent."),
+				),
+			), agentRuntimeHandler.AckWorkItemHandler)
+		}
+
+		if shouldAddTool(ToolHeartbeatWorkItem, enabledTools, "SLACK_MCP_AGENT_RUNTIME_TOOLS") {
+			s.AddTool(mcp.NewTool(ToolHeartbeatWorkItem,
+				mcp.WithDescription("Renew the lease for a work item that is currently being processed."),
+				mcp.WithTitleAnnotation("Heartbeat Work Item"),
+				mcp.WithString("work_item_id",
+					mcp.Required(),
+					mcp.Description("Opaque work item ID to renew."),
+				),
+				mcp.WithString("agent_id",
+					mcp.Description("Agent ID that holds the lease. Defaults to the configured default agent."),
+				),
+			), agentRuntimeHandler.HeartbeatWorkItemHandler)
+		}
+
+		if shouldAddTool(ToolRegisterAgent, enabledTools, "SLACK_MCP_AGENT_RUNTIME_TOOLS") {
+			s.AddTool(mcp.NewTool(ToolRegisterAgent,
+				mcp.WithDescription("Register an agent with the runtime."),
+				mcp.WithTitleAnnotation("Register Agent"),
+				mcp.WithString("agent_id",
+					mcp.Description("Unique agent ID. Use the same ID as the default agent if one is configured."),
+				),
+				mcp.WithString("tmux_session",
+					mcp.Description("Optional tmux session name for wake messages."),
+				),
+			), agentRuntimeHandler.RegisterAgentHandler)
+		}
+
+		if shouldAddTool(ToolWatchThread, enabledTools, "SLACK_MCP_AGENT_RUNTIME_TOOLS") {
+			s.AddTool(mcp.NewTool(ToolWatchThread,
+				mcp.WithDescription("Register a thread for polling. The runtime will create work items when new messages appear in this thread."),
+				mcp.WithTitleAnnotation("Watch Thread"),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithString("channel_id",
+					mcp.Required(),
+					mcp.Description("ID of the channel containing the thread."),
+				),
+				mcp.WithString("thread_ts",
+					mcp.Required(),
+					mcp.Description("Parent message timestamp of the thread."),
+				),
+			), agentRuntimeHandler.WatchThreadHandler)
 		}
 	}
 

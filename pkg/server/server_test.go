@@ -116,6 +116,11 @@ func TestValidToolNames(t *testing.T) {
 			ToolSavedList:                   true,
 			ToolSavedUpdate:                 true,
 			ToolSavedClearCompleted:         true,
+			ToolReadWorkItem:                true,
+			ToolAckWorkItem:                 true,
+			ToolHeartbeatWorkItem:           true,
+			ToolRegisterAgent:               true,
+			ToolWatchThread:                 true,
 		}
 
 		assert.Equal(t, len(expectedTools), len(ValidToolNames), "ValidToolNames should have %d tools", len(expectedTools))
@@ -148,6 +153,11 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "saved_list", ToolSavedList)
 		assert.Equal(t, "saved_update", ToolSavedUpdate)
 		assert.Equal(t, "saved_clear_completed", ToolSavedClearCompleted)
+		assert.Equal(t, "slack_read_work_item", ToolReadWorkItem)
+		assert.Equal(t, "slack_ack_work_item", ToolAckWorkItem)
+		assert.Equal(t, "slack_heartbeat_work_item", ToolHeartbeatWorkItem)
+		assert.Equal(t, "slack_register_agent", ToolRegisterAgent)
+		assert.Equal(t, "slack_watch_thread", ToolWatchThread)
 	})
 }
 
