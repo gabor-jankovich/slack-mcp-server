@@ -194,6 +194,9 @@ func ConfigFromEnv() models.RuntimeConfig {
 	if v := os.Getenv("SLACK_MCP_AGENT_RUNTIME_HOT_INTERVAL"); v != "" {
 		cfg.HotInterval = parseDuration(v, cfg.HotInterval)
 	}
+	if v := os.Getenv("SLACK_MCP_AGENT_RUNTIME_BOT_USER_ID"); v != "" {
+		cfg.BotUserID = v
+	}
 
 	return cfg
 }

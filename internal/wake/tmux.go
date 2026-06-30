@@ -24,19 +24,69 @@ func NewTmuxProvider(defaultSession string, logger *zap.Logger) *TmuxProvider {
 	}
 }
 
+// slashCommands maps !-prefixed Slack commands to Claude Code slash commands.
+var slashCommands = map[string]string{
+	"compact": "/compact",
+	"clear":   "/clear",
+	"status":  "/status",
+}
+
 // Wake sends a tmux key sequence to the configured session.
+// If the message starts with "!", it is treated as a direct slash command.
 func (p *TmuxProvider) Wake(ctx context.Context, req models.WakeRequest) error {
-	session := p.defaultSession
+	session := req.TmuxSession
 	if session == "" {
-		return fmt.Errorf("tmux default session is not configured")
+		session = p.defaultSession
+	}
+	if session == "" {
+		return fmt.Errorf("tmux session is not configured for agent %q", req.AgentID)
+	}
+
+	// Check if this is a ! command that maps to a slash command.
+	msgText := strings.TrimSpace(req.MessageText)
+	if strings.HasPrefix(msgText, "!") {
+		cmdName := strings.TrimPrefix(msgText, "!")
+		cmdName = strings.SplitN(cmdName, " ", 2)[0] // first word only
+		if slashCmd, ok := slashCommands[cmdName]; ok {
+			return p.sendSlashCommand(ctx, session, slashCmd, req)
+		}
+		// Not a known slash command — fall through to normal system event.
 	}
 
 	message := fmt.Sprintf(
-		"System event received.\n\nwork_item_id=%s\n\nPlease call:\n\nslack_read_work_item(work_item_id='%s')\n",
+		"System event received.\n\nwork_item_id=%s\n\nPlease call:\n\nslack_read_work_item(work_item_id='%s')",
 		req.WorkItemID, req.WorkItemID,
 	)
 
-	cmd := exec.CommandContext(ctx, "tmux", "send-keys", "-t", session, message, "C-m")
+	if err := p.sendKeys(ctx, session, message); err != nil {
+		return err
+	}
+
+	p.logger.Info("wrote wake message to tmux session",
+		zap.String("session", session),
+		zap.String("work_item_id", req.WorkItemID),
+		zap.String("agent_id", req.AgentID))
+	return nil
+}
+
+// sendSlashCommand sends a Claude Code slash command (e.g. /compact) to the tmux session.
+func (p *TmuxProvider) sendSlashCommand(ctx context.Context, session, slashCmd string, req models.WakeRequest) error {
+	if err := p.sendKeys(ctx, session, slashCmd); err != nil {
+		return err
+	}
+
+	p.logger.Info("sent slash command to tmux session",
+		zap.String("session", session),
+		zap.String("command", slashCmd),
+		zap.String("work_item_id", req.WorkItemID),
+		zap.String("agent_id", req.AgentID))
+	return nil
+}
+
+// sendKeys sends literal text followed by Enter to a tmux session.
+func (p *TmuxProvider) sendKeys(ctx context.Context, session, text string) error {
+	// Send the text literally (-l flag prevents interpreting special keys in the text).
+	cmd := exec.CommandContext(ctx, "tmux", "send-keys", "-t", session, "-l", text)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "session not found") {
@@ -45,10 +95,11 @@ func (p *TmuxProvider) Wake(ctx context.Context, req models.WakeRequest) error {
 		return fmt.Errorf("tmux send-keys failed: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	p.logger.Info("wrote wake message to tmux session",
-		zap.String("session", session),
-		zap.String("work_item_id", req.WorkItemID),
-		zap.String("agent_id", req.AgentID))
+	// Send Enter as a separate key event to submit the text.
+	enterCmd := exec.CommandContext(ctx, "tmux", "send-keys", "-t", session, "Enter")
+	if enterOut, enterErr := enterCmd.CombinedOutput(); enterErr != nil {
+		return fmt.Errorf("tmux send-keys Enter failed: %w: %s", enterErr, strings.TrimSpace(string(enterOut)))
+	}
 	return nil
 }
 

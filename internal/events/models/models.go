@@ -24,6 +24,7 @@ type WorkItem struct {
 	ChannelID       string
 	ThreadTS        string
 	NewestMessageTS string
+	MessageText     string
 	Status          WorkItemStatus
 	RetryCount      int
 	Version         int
@@ -42,6 +43,7 @@ type EventCandidate struct {
 	ChannelID       string
 	ThreadTS        string
 	NewestMessageTS string
+	MessageText     string
 	Payload         []byte
 }
 
@@ -84,6 +86,13 @@ type ThreadState struct {
 	UpdatedAt              time.Time
 }
 
+// ChannelState tracks the last processed message timestamp per channel.
+type ChannelState struct {
+	ChannelID              string
+	LastProcessedMessageTS string
+	UpdatedAt              time.Time
+}
+
 // Agent represents a registered agent session.
 type Agent struct {
 	AgentID       string
@@ -95,10 +104,12 @@ type Agent struct {
 
 // WakeRequest is sent to a WakeProvider to notify an agent.
 type WakeRequest struct {
-	AgentID    string
-	WorkItemID string
-	Priority   int
-	Reason     string
+	AgentID     string
+	TmuxSession string
+	WorkItemID  string
+	MessageText string
+	Priority    int
+	Reason      string
 }
 
 // WakeProvider injects wake metadata into an agent session.
@@ -130,6 +141,7 @@ type RuntimeConfig struct {
 	CooldownInterval    time.Duration
 	CooldownDuration    time.Duration
 	DefaultAgentID      string
+	BotUserID           string
 }
 
 // DefaultRuntimeConfig returns sensible defaults.

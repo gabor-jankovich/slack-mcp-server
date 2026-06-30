@@ -12,7 +12,7 @@ import (
 )
 
 // schemaVersion is the current migration version.
-const schemaVersion = 1
+const schemaVersion = 3
 
 // migrations holds ordered SQL migration scripts.
 var migrations = []string{
@@ -69,6 +69,24 @@ var migrations = []string{
 	INSERT INTO schema_migrations (version) VALUES (1)
 		ON CONFLICT(version) DO NOTHING;
 	`,
+	// Version 2
+	`CREATE TABLE IF NOT EXISTS channel_state (
+		channel_id TEXT PRIMARY KEY,
+		last_processed_message_ts TEXT,
+		updated_at DATETIME
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_channel_state_updated ON channel_state(updated_at);
+
+	INSERT INTO schema_migrations (version) VALUES (2)
+		ON CONFLICT(version) DO NOTHING;
+	`,
+	// Version 3
+	`ALTER TABLE conversation_work_items ADD COLUMN message_text TEXT DEFAULT '';
+
+	INSERT INTO schema_migrations (version) VALUES (3)
+		ON CONFLICT(version) DO NOTHING;
+	`,
 }
 
 // Open opens a SQLite database at the given path and runs migrations.
@@ -80,10 +98,16 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	dsn := sqliteDSN(path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite database: %w", err)
 	}
+
+	// SQLite allows only one concurrent writer. Limiting the pool to a single
+	// connection prevents SQLITE_BUSY errors when multiple goroutines write
+	// simultaneously.
+	db.SetMaxOpenConns(1)
 
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("pinging sqlite database: %w", err)
@@ -94,6 +118,14 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+func sqliteDSN(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "_busy_timeout=5000&_journal_mode=WAL"
 }
 
 // Run applies pending migrations.

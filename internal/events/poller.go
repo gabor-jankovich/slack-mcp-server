@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 // SlackClient is the minimal Slack API surface needed by the poller.
 type SlackClient interface {
 	GetConversationRepliesContext(ctx context.Context, params *slack.GetConversationRepliesParameters) (msgs []slack.Message, hasMore bool, nextCursor string, err error)
+	GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error)
 }
 
 // PollerStore is the store surface needed by the poller.
@@ -21,6 +23,8 @@ type PollerStore interface {
 	LoadAllThreadStates(ctx context.Context) ([]models.ThreadState, error)
 	LoadThreadState(ctx context.Context, channelID, threadTS string) (models.ThreadState, error)
 	SaveThreadState(ctx context.Context, state models.ThreadState) (models.ThreadState, error)
+	LoadChannelState(ctx context.Context, channelID string) (models.ChannelState, error)
+	SaveChannelState(ctx context.Context, state models.ChannelState) (models.ChannelState, error)
 }
 
 // PollerState is the polling interval state machine.
@@ -114,6 +118,10 @@ func (p *SlackEventSource) loop(ctx context.Context) {
 }
 
 func (p *SlackEventSource) poll(ctx context.Context) (bool, error) {
+	if p.config.PollingMode == "watch_channels" {
+		return p.pollChannels(ctx)
+	}
+
 	states, err := p.store.LoadAllThreadStates(ctx)
 	if err != nil {
 		return false, fmt.Errorf("loading thread states: %w", err)
@@ -158,6 +166,7 @@ func (p *SlackEventSource) pollThread(ctx context.Context, state models.ThreadSt
 	}
 
 	var newestTS string
+	var firstMsgText string
 	found := false
 	for _, msg := range msgs {
 		// Skip the parent message itself if oldest is empty.
@@ -169,8 +178,11 @@ func (p *SlackEventSource) pollThread(ctx context.Context, state models.ThreadSt
 			continue
 		}
 		// Skip bot noise, activity messages, and reactions.
-		if shouldIgnoreMessage(msg) {
+		if shouldIgnoreMessage(msg, p.config.BotUserID) {
 			continue
+		}
+		if !found {
+			firstMsgText = msg.Text
 		}
 		found = true
 		if msg.Timestamp > newestTS {
@@ -187,6 +199,7 @@ func (p *SlackEventSource) pollThread(ctx context.Context, state models.ThreadSt
 		ChannelID:       state.ChannelID,
 		ThreadTS:        state.ThreadTS,
 		NewestMessageTS: newestTS,
+		MessageText:     firstMsgText,
 	}
 
 	select {
@@ -198,6 +211,130 @@ func (p *SlackEventSource) pollThread(ctx context.Context, state models.ThreadSt
 	p.logger.Debug("emitted slack event candidate",
 		zap.String("channel_id", state.ChannelID),
 		zap.String("thread_ts", state.ThreadTS),
+		zap.String("newest_message_ts", newestTS))
+
+	return true, nil
+}
+
+func (p *SlackEventSource) pollChannels(ctx context.Context) (bool, error) {
+	if len(p.config.PollingChannels) == 0 {
+		p.logger.Warn("watch_channels mode enabled but no channels configured")
+		return false, nil
+	}
+
+	activity := false
+	for _, channelID := range p.config.PollingChannels {
+		found, err := p.pollChannel(ctx, channelID)
+		if err != nil {
+			p.logger.Error("polling channel failed",
+				zap.String("channel_id", channelID),
+				zap.Error(err))
+			continue
+		}
+		if found {
+			activity = true
+		}
+	}
+
+	return activity, nil
+}
+
+func (p *SlackEventSource) pollChannel(ctx context.Context, channelID string) (bool, error) {
+	state, err := p.store.LoadChannelState(ctx, channelID)
+	if err != nil && err != sql.ErrNoRows {
+		return false, fmt.Errorf("loading channel state: %w", err)
+	}
+
+	params := &slack.GetConversationHistoryParameters{
+		ChannelID: channelID,
+		Limit:     100,
+	}
+	if state.LastProcessedMessageTS != "" {
+		params.Oldest = state.LastProcessedMessageTS
+	}
+
+	resp, err := p.client.GetConversationHistoryContext(ctx, params)
+	if err != nil {
+		return false, fmt.Errorf("fetching channel history: %w", err)
+	}
+
+	var newestTS string
+	type threadInfo struct {
+		newestMsgTS string
+		firstText   string
+	}
+	threadCandidates := make(map[string]*threadInfo) // thread_ts -> info
+	for _, msg := range resp.Messages {
+		if state.LastProcessedMessageTS != "" && msg.Timestamp <= state.LastProcessedMessageTS {
+			continue
+		}
+		if shouldIgnoreMessage(msg, p.config.BotUserID) {
+			continue
+		}
+
+		threadTS := msg.Timestamp
+		if msg.ThreadTimestamp != "" {
+			threadTS = msg.ThreadTimestamp
+		}
+
+		if msg.Timestamp > newestTS {
+			newestTS = msg.Timestamp
+		}
+		if info, ok := threadCandidates[threadTS]; !ok {
+			threadCandidates[threadTS] = &threadInfo{newestMsgTS: msg.Timestamp, firstText: msg.Text}
+		} else if msg.Timestamp > info.newestMsgTS {
+			info.newestMsgTS = msg.Timestamp
+		}
+	}
+
+	if len(threadCandidates) == 0 {
+		return false, nil
+	}
+
+	now := time.Now()
+	for threadTS, info := range threadCandidates {
+		threadState := models.ThreadState{
+			ChannelID:              channelID,
+			ThreadTS:               threadTS,
+			LastProcessedMessageTS: "",
+			UpdatedAt:              now,
+		}
+		if _, err := p.store.SaveThreadState(ctx, threadState); err != nil {
+			p.logger.Error("saving thread state from channel poll failed",
+				zap.String("channel_id", channelID),
+				zap.String("thread_ts", threadTS),
+				zap.Error(err))
+			continue
+		}
+
+		candidate := models.EventCandidate{
+			SourceID:        "slack",
+			ChannelID:       channelID,
+			ThreadTS:        threadTS,
+			NewestMessageTS: info.newestMsgTS,
+			MessageText:     info.firstText,
+		}
+		select {
+		case p.candidates <- candidate:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
+
+	if newestTS != "" {
+		state.ChannelID = channelID
+		state.LastProcessedMessageTS = newestTS
+		state.UpdatedAt = now
+		if _, err := p.store.SaveChannelState(ctx, state); err != nil {
+			p.logger.Error("saving channel state failed",
+				zap.String("channel_id", channelID),
+				zap.Error(err))
+		}
+	}
+
+	p.logger.Debug("emitted channel candidates",
+		zap.String("channel_id", channelID),
+		zap.Int("candidate_count", len(threadCandidates)),
 		zap.String("newest_message_ts", newestTS))
 
 	return true, nil
@@ -256,7 +393,7 @@ func (p *SlackEventSource) currentInterval() time.Duration {
 	}
 }
 
-func shouldIgnoreMessage(msg slack.Message) bool {
+func shouldIgnoreMessage(msg slack.Message, botUserID string) bool {
 	// Ignore reactions and typing events.
 	if msg.SubType == "reaction" || msg.SubType == "typing" {
 		return true
@@ -267,6 +404,14 @@ func shouldIgnoreMessage(msg slack.Message) bool {
 	}
 	// Ignore message edits.
 	if msg.SubType == "message_changed" {
+		return true
+	}
+	// Ignore bot messages (subtypes or explicit bot_id field).
+	if msg.SubType == "bot_message" || msg.BotID != "" {
+		return true
+	}
+	// Ignore messages sent by the bot's own user ID.
+	if botUserID != "" && msg.User == botUserID {
 		return true
 	}
 	return false

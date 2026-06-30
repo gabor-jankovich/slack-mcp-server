@@ -54,6 +54,7 @@ func (m *Manager) CreateOrUpdateWorkItem(ctx context.Context, candidate models.E
 		ChannelID:       candidate.ChannelID,
 		ThreadTS:        candidate.ThreadTS,
 		NewestMessageTS: candidate.NewestMessageTS,
+		MessageText:     candidate.MessageText,
 		Status:          models.StatusNew,
 		RetryCount:      0,
 		Version:         version,

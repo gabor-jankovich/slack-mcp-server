@@ -91,6 +91,9 @@ func (s *Scheduler) dispatchOnce(ctx context.Context) {
 
 	item := items[0]
 	agentID := s.config.DefaultAgentID
+	if agentID == "" {
+		agentID = "default"
+	}
 
 	acquired, err := s.store.AcquireLease(ctx, item.ID, agentID, s.config.LeaseDuration)
 	if err != nil {
@@ -103,8 +106,16 @@ func (s *Scheduler) dispatchOnce(ctx context.Context) {
 		return
 	}
 
+	agent, err := s.store.LoadAgent(ctx, agentID)
+	if err != nil {
+		s.logger.Warn("scheduler failed to load agent, using defaults",
+			zap.String("agent_id", agentID),
+			zap.Error(err))
+	}
+
 	if _, err := s.store.RegisterAgent(ctx, models.Agent{
 		AgentID:       agentID,
+		TmuxSession:   agent.TmuxSession,
 		Status:        "active",
 		CurrentThread: &item.ThreadTS,
 	}); err != nil {
@@ -114,10 +125,12 @@ func (s *Scheduler) dispatchOnce(ctx context.Context) {
 	}
 
 	req := models.WakeRequest{
-		AgentID:    agentID,
-		WorkItemID: item.ID,
-		Priority:   1,
-		Reason:     fmt.Sprintf("new work item from %s", item.SourceID),
+		AgentID:     agentID,
+		TmuxSession: agent.TmuxSession,
+		WorkItemID:  item.ID,
+		MessageText: item.MessageText,
+		Priority:    1,
+		Reason:      fmt.Sprintf("new work item from %s", item.SourceID),
 	}
 	if err := s.wakeProvider.Wake(ctx, req); err != nil {
 		s.logger.Error("wake provider failed",

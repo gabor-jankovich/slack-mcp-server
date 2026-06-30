@@ -26,12 +26,12 @@ func (s *SQLiteStore) CreateWorkItem(ctx context.Context, item models.WorkItem) 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO conversation_work_items (
-			id, source_id, channel_id, thread_ts, newest_message_ts, status,
+			id, source_id, channel_id, thread_ts, newest_message_ts, message_text, status,
 			retry_count, version, message_count, agent_id, lease_until,
 			created_at, updated_at, delivered_at, acked_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		item.ID, item.SourceID, item.ChannelID, item.ThreadTS, item.NewestMessageTS, item.Status,
+		item.ID, item.SourceID, item.ChannelID, item.ThreadTS, item.NewestMessageTS, item.MessageText, item.Status,
 		item.RetryCount, item.Version, item.MessageCount, nullStringPtr(item.AgentID), nullTimePtr(item.LeaseUntil),
 		item.CreatedAt, item.UpdatedAt, nullTimePtr(item.DeliveredAt), nullTimePtr(item.AckedAt),
 	)
@@ -46,12 +46,12 @@ func (s *SQLiteStore) UpdateWorkItem(ctx context.Context, item models.WorkItem) 
 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE conversation_work_items
-		SET source_id = ?, channel_id = ?, thread_ts = ?, newest_message_ts = ?, status = ?,
+		SET source_id = ?, channel_id = ?, thread_ts = ?, newest_message_ts = ?, message_text = ?, status = ?,
 			retry_count = ?, version = ?, message_count = ?, agent_id = ?, lease_until = ?,
 			updated_at = ?, delivered_at = ?, acked_at = ?
 		WHERE id = ?
 	`,
-		item.SourceID, item.ChannelID, item.ThreadTS, item.NewestMessageTS, item.Status,
+		item.SourceID, item.ChannelID, item.ThreadTS, item.NewestMessageTS, item.MessageText, item.Status,
 		item.RetryCount, item.Version, item.MessageCount, nullStringPtr(item.AgentID), nullTimePtr(item.LeaseUntil),
 		item.UpdatedAt, nullTimePtr(item.DeliveredAt), nullTimePtr(item.AckedAt),
 		item.ID,
@@ -64,7 +64,7 @@ func (s *SQLiteStore) UpdateWorkItem(ctx context.Context, item models.WorkItem) 
 
 func (s *SQLiteStore) LoadPending(ctx context.Context, limit int) ([]models.WorkItem, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, status,
+		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, message_text, status,
 			retry_count, version, message_count, agent_id, lease_until,
 			created_at, updated_at, delivered_at, acked_at
 		FROM conversation_work_items
@@ -82,7 +82,7 @@ func (s *SQLiteStore) LoadPending(ctx context.Context, limit int) ([]models.Work
 
 func (s *SQLiteStore) LoadByID(ctx context.Context, id string) (models.WorkItem, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, status,
+		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, message_text, status,
 			retry_count, version, message_count, agent_id, lease_until,
 			created_at, updated_at, delivered_at, acked_at
 		FROM conversation_work_items
@@ -152,23 +152,26 @@ func (s *SQLiteStore) RenewLease(ctx context.Context, itemID, agentID string, tt
 		return false, fmt.Errorf("loading work item for renew: %w", err)
 	}
 
-	if !currentAgentID.Valid || currentAgentID.String != agentID {
+	// Allow renew if agent_id in DB is NULL/empty (legacy) or matches.
+	if currentAgentID.Valid && currentAgentID.String != "" && currentAgentID.String != agentID {
 		return false, nil
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
 		UPDATE conversation_work_items
-		SET lease_until = ?, updated_at = ?
+		SET lease_until = ?, agent_id = ?, updated_at = ?
 		WHERE id = ?
-	`, leaseUntil, now, itemID); err != nil {
+	`, leaseUntil, agentID, now, itemID); err != nil {
 		return false, fmt.Errorf("renewing work item lease: %w", err)
 	}
 
 	if _, err := s.db.ExecContext(ctx, `
-		UPDATE leases
-		SET lease_until = ?
-		WHERE work_item_id = ? AND agent_id = ?
-	`, leaseUntil, itemID, agentID); err != nil {
+		INSERT INTO leases (work_item_id, agent_id, lease_until)
+		VALUES (?, ?, ?)
+		ON CONFLICT(work_item_id) DO UPDATE SET
+			agent_id = excluded.agent_id,
+			lease_until = excluded.lease_until
+	`, itemID, agentID, leaseUntil); err != nil {
 		return false, fmt.Errorf("renewing lease: %w", err)
 	}
 	return true, nil
@@ -210,7 +213,8 @@ func (s *SQLiteStore) Ack(ctx context.Context, itemID, agentID string, newestMes
 	if status != string(models.StatusProcessing) {
 		return models.WorkItem{}, fmt.Errorf("work item is not in PROCESSING state")
 	}
-	if !currentAgentID.Valid || currentAgentID.String != agentID {
+	// Allow ack if the stored agent_id is NULL/empty (legacy leases) or matches.
+	if currentAgentID.Valid && currentAgentID.String != "" && currentAgentID.String != agentID {
 		return models.WorkItem{}, fmt.Errorf("work item not leased by agent %s", agentID)
 	}
 
@@ -363,6 +367,44 @@ func (s *SQLiteStore) SaveThreadState(ctx context.Context, state models.ThreadSt
 	return state, nil
 }
 
+func (s *SQLiteStore) LoadChannelState(ctx context.Context, channelID string) (models.ChannelState, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT channel_id, last_processed_message_ts, updated_at
+		FROM channel_state
+		WHERE channel_id = ?
+	`, channelID)
+
+	var state models.ChannelState
+	var lastProcessed sql.NullString
+	if err := row.Scan(&state.ChannelID, &lastProcessed, &state.UpdatedAt); err != nil {
+		if err == sql.ErrNoRows {
+			return models.ChannelState{}, sql.ErrNoRows
+		}
+		return models.ChannelState{}, fmt.Errorf("loading channel state: %w", err)
+	}
+	if lastProcessed.Valid {
+		state.LastProcessedMessageTS = lastProcessed.String
+	}
+	return state, nil
+}
+
+func (s *SQLiteStore) SaveChannelState(ctx context.Context, state models.ChannelState) (models.ChannelState, error) {
+	now := time.Now().UTC()
+	state.UpdatedAt = now
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO channel_state (channel_id, last_processed_message_ts, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(channel_id) DO UPDATE SET
+			last_processed_message_ts = excluded.last_processed_message_ts,
+			updated_at = excluded.updated_at
+	`, state.ChannelID, nullString(state.LastProcessedMessageTS), now)
+	if err != nil {
+		return models.ChannelState{}, fmt.Errorf("saving channel state: %w", err)
+	}
+	return state, nil
+}
+
 func (s *SQLiteStore) RegisterAgent(ctx context.Context, agent models.Agent) (models.Agent, error) {
 	now := time.Now().UTC()
 	agent.Heartbeat = &now
@@ -411,7 +453,7 @@ func (s *SQLiteStore) LoadAgent(ctx context.Context, agentID string) (models.Age
 // FindPendingWorkItemByThread returns any non-terminal work item for a thread.
 func (s *SQLiteStore) FindPendingWorkItemByThread(ctx context.Context, channelID, threadTS string) (models.WorkItem, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, status,
+		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, message_text, status,
 			retry_count, version, message_count, agent_id, lease_until,
 			created_at, updated_at, delivered_at, acked_at
 		FROM conversation_work_items
@@ -450,7 +492,7 @@ func (s *SQLiteStore) NextVersionForThread(ctx context.Context, channelID, threa
 func (s *SQLiteStore) LoadExpiredLeases(ctx context.Context, limit int) ([]models.WorkItem, error) {
 	now := time.Now().UTC()
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, status,
+		SELECT id, source_id, channel_id, thread_ts, newest_message_ts, message_text, status,
 			retry_count, version, message_count, agent_id, lease_until,
 			created_at, updated_at, delivered_at, acked_at
 		FROM conversation_work_items
@@ -473,7 +515,7 @@ func scanWorkItem(row *sql.Row) (models.WorkItem, error) {
 	var deliveredAt, ackedAt sql.NullTime
 
 	if err := row.Scan(
-		&item.ID, &item.SourceID, &item.ChannelID, &item.ThreadTS, &item.NewestMessageTS, &item.Status,
+		&item.ID, &item.SourceID, &item.ChannelID, &item.ThreadTS, &item.NewestMessageTS, &item.MessageText, &item.Status,
 		&item.RetryCount, &item.Version, &item.MessageCount, &agentID, &leaseUntil,
 		&item.CreatedAt, &item.UpdatedAt, &deliveredAt, &ackedAt,
 	); err != nil {
@@ -506,7 +548,7 @@ func scanWorkItems(rows *sql.Rows) ([]models.WorkItem, error) {
 		var leaseUntil, deliveredAt, ackedAt sql.NullTime
 
 		if err := rows.Scan(
-			&item.ID, &item.SourceID, &item.ChannelID, &item.ThreadTS, &item.NewestMessageTS, &item.Status,
+			&item.ID, &item.SourceID, &item.ChannelID, &item.ThreadTS, &item.NewestMessageTS, &item.MessageText, &item.Status,
 			&item.RetryCount, &item.Version, &item.MessageCount, &agentID, &leaseUntil,
 			&item.CreatedAt, &item.UpdatedAt, &deliveredAt, &ackedAt,
 		); err != nil {

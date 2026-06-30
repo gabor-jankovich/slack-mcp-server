@@ -76,7 +76,9 @@ func (h *AgentRuntimeHandler) ReadWorkItemHandler(ctx context.Context, request m
 	}
 
 	if item.Status == models.StatusLeased {
+		agentID := h.agentID(request)
 		item.Status = models.StatusProcessing
+		item.AgentID = &agentID
 		item.UpdatedAt = time.Now().UTC()
 		if _, err := h.store.UpdateWorkItem(ctx, item); err != nil {
 			h.logger.Warn("failed to update work item status to PROCESSING", zap.Error(err))
