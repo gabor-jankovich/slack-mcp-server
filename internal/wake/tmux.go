@@ -31,6 +31,18 @@ var slashCommands = map[string]string{
 	"status":  "/status",
 }
 
+// IsSlashCommand returns true if the message text is a known !-prefixed slash command.
+func IsSlashCommand(messageText string) bool {
+	msgText := strings.TrimSpace(messageText)
+	if !strings.HasPrefix(msgText, "!") {
+		return false
+	}
+	cmdName := strings.TrimPrefix(msgText, "!")
+	cmdName = strings.SplitN(cmdName, " ", 2)[0]
+	_, ok := slashCommands[cmdName]
+	return ok
+}
+
 // Wake sends a tmux key sequence to the configured session.
 // If the message starts with "!", it is treated as a direct slash command.
 func (p *TmuxProvider) Wake(ctx context.Context, req models.WakeRequest) error {

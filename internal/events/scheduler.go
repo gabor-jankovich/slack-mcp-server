@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/korotovsky/slack-mcp-server/internal/events/models"
+	"github.com/korotovsky/slack-mcp-server/internal/wake"
 	"go.uber.org/zap"
 )
 
@@ -137,6 +138,20 @@ func (s *Scheduler) dispatchOnce(ctx context.Context) {
 			zap.String("work_item_id", item.ID),
 			zap.String("agent_id", agentID),
 			zap.Error(err))
+		return
+	}
+
+	// Slash commands don't go through agent-side read/ack lifecycle — auto-ack them.
+	if wake.IsSlashCommand(item.MessageText) {
+		if _, err := s.store.Ack(ctx, item.ID, agentID, item.NewestMessageTS); err != nil {
+			s.logger.Warn("auto-ack for slash command failed",
+				zap.String("work_item_id", item.ID),
+				zap.Error(err))
+		} else {
+			s.logger.Info("auto-acked slash command work item",
+				zap.String("work_item_id", item.ID),
+				zap.String("command", item.MessageText))
+		}
 		return
 	}
 

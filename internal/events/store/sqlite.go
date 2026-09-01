@@ -210,8 +210,8 @@ func (s *SQLiteStore) Ack(ctx context.Context, itemID, agentID string, newestMes
 		return models.WorkItem{}, fmt.Errorf("loading work item for ack: %w", err)
 	}
 
-	if status != string(models.StatusProcessing) {
-		return models.WorkItem{}, fmt.Errorf("work item is not in PROCESSING state")
+	if status != string(models.StatusProcessing) && status != string(models.StatusLeased) {
+		return models.WorkItem{}, fmt.Errorf("work item is not in PROCESSING or LEASED state")
 	}
 	// Allow ack if the stored agent_id is NULL/empty (legacy leases) or matches.
 	if currentAgentID.Valid && currentAgentID.String != "" && currentAgentID.String != agentID {
